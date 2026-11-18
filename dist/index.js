@@ -86,6 +86,16 @@ var PredicateQuantifier;
      * specify anything as a predicate quantifier.
      */
     PredicateQuantifier["SOME"] = "some";
+    /**
+     * When choosing 'some-with-excludes' in the config it means that files will get matched if
+     * at least one of the patterns matches them and none of the negated patterns (the ones
+     * prefixed with '!') matches them. An exclusion is final - a file excluded by one pattern
+     * can't be included back by another one.
+     *
+     * A filter which consists of negated patterns only never matches anything,
+     * because there is no pattern which could include a file in the first place.
+     */
+    PredicateQuantifier["SOME_WITH_EXCLUDES"] = "some-with-excludes";
 })(PredicateQuantifier || (exports.PredicateQuantifier = PredicateQuantifier = {}));
 /**
  * An array of strings (at runtime) that contains the valid/accepted values for
@@ -126,15 +136,35 @@ class Filter {
         return result;
     }
     isMatch(file, patterns) {
-        var _a;
-        const aPredicate = (rule) => {
-            return (rule.status === undefined || rule.status.includes(file.status)) && rule.isMatch(file.filename);
+        var _a, _b, _c;
+        const isStatusMatch = (rule) => {
+            return rule.status === undefined || rule.status.includes(file.status);
         };
-        if (((_a = this.filterConfig) === null || _a === void 0 ? void 0 : _a.predicateQuantifier) === 'every') {
-            return patterns.every(aPredicate);
-        }
-        else {
-            return patterns.some(aPredicate);
+        const aPredicate = (rule) => {
+            return isStatusMatch(rule) && rule.isMatch(file.filename);
+        };
+        switch ((_a = this.filterConfig) === null || _a === void 0 ? void 0 : _a.predicateQuantifier) {
+            case PredicateQuantifier.EVERY:
+                return patterns.every(aPredicate);
+            case PredicateQuantifier.SOME_WITH_EXCLUDES: {
+                let isIncluded = false;
+                for (const rule of patterns) {
+                    if (!isStatusMatch(rule)) {
+                        continue;
+                    }
+                    // Once a file is excluded it stays excluded - no other pattern can include it back.
+                    // Therefore all the patterns have to be evaluated even if the file is already included.
+                    if ((_b = rule.isExclude) === null || _b === void 0 ? void 0 : _b.call(rule, file.filename)) {
+                        return false;
+                    }
+                    if (!isIncluded && ((_c = rule.isInclude) === null || _c === void 0 ? void 0 : _c.call(rule, file.filename))) {
+                        isIncluded = true;
+                    }
+                }
+                return isIncluded;
+            }
+            default:
+                return patterns.some(aPredicate);
         }
     }
     parseFilterItemYaml(item) {
@@ -142,21 +172,19 @@ class Filter {
             return flat(item.map(i => this.parseFilterItemYaml(i)));
         }
         if (typeof item === 'string') {
-            return [{ status: undefined, isMatch: (0, picomatch_1.default)(item, MatchOptions) }];
+            return [createRuleItem(item)];
         }
         if (typeof item === 'object') {
             return Object.entries(item).map(([key, pattern]) => {
                 if (typeof key !== 'string' || (typeof pattern !== 'string' && !Array.isArray(pattern))) {
                     this.throwInvalidFormatError(`Expected [key:string]= pattern:string | string[], but [${key}:${typeof key}]= ${pattern}:${typeof pattern} found`);
                 }
-                return {
-                    status: key
-                        .split('|')
-                        .map(x => x.trim())
-                        .filter(x => x.length > 0)
-                        .map(x => x.toLowerCase()),
-                    isMatch: (0, picomatch_1.default)(pattern, MatchOptions)
-                };
+                const status = key
+                    .split('|')
+                    .map(x => x.trim())
+                    .filter(x => x.length > 0)
+                    .map(x => x.toLowerCase());
+                return createRuleItem(pattern, status);
             });
         }
         this.throwInvalidFormatError(`Unexpected element type '${typeof item}'`);
@@ -170,6 +198,24 @@ exports.Filter = Filter;
 // In future could be replaced by Array.prototype.flat (supported on Node.js 11+)
 function flat(arr) {
     return arr.reduce((acc, val) => acc.concat(val), []);
+}
+// Compiles filename pattern(s) of a single filter rule item into matchers.
+// Multiple patterns are OR-ed together, which is how picomatch treats an array of globs.
+// Patterns are also split by their polarity, so PredicateQuantifier.SOME_WITH_EXCLUDES
+// can tell inclusions from exclusions. Note that only a leading '!' negates the whole
+// pattern - the '!(...)' extglob is a regular pattern matching everything it doesn't enumerate.
+function createRuleItem(patterns, status) {
+    const matchers = (Array.isArray(patterns) ? patterns : [patterns]).map(pattern => (0, picomatch_1.default)(pattern, MatchOptions, true));
+    // picomatch inverts the result of a matcher created from a negated pattern.
+    // Inverting it back gives a matcher of the filenames such pattern excludes.
+    const includes = matchers.filter(matcher => !matcher.state.negated);
+    const excludes = matchers.filter(matcher => matcher.state.negated);
+    return {
+        status,
+        isMatch: str => matchers.some(matcher => matcher(str)),
+        isInclude: includes.length > 0 ? str => includes.some(matcher => matcher(str)) : undefined,
+        isExclude: excludes.length > 0 ? str => excludes.some(matcher => !matcher(str)) : undefined
+    };
 }
 
 
@@ -204,17 +250,46 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.isGitSha = exports.getShortName = exports.getCurrentRef = exports.listAllFilesAsAdded = exports.parseGitDiffOutput = exports.getChangesSinceMergeBase = exports.getChangesOnHead = exports.getChanges = exports.getChangesInLastCommit = exports.HEAD = exports.NULL_SHA = void 0;
+exports.isGitSha = exports.getShortName = exports.getCurrentRef = exports.listAllFilesAsAdded = exports.parseGitDiffOutput = exports.getChangesSinceMergeBase = exports.getChangesOnHead = exports.getChanges = exports.getChangesInLastCommit = exports.gitExec = exports.HEAD = exports.NULL_SHA = void 0;
 const exec_1 = __nccwpck_require__(1514);
 const core = __importStar(__nccwpck_require__(2186));
 const file_1 = __nccwpck_require__(4014);
+const safe_directory_1 = __nccwpck_require__(2126);
 exports.NULL_SHA = '0000000000000000000000000000000000000000';
 exports.HEAD = 'HEAD';
+async function gitExec(args, options) {
+    var _a;
+    // ignoreReturnCode is always set so exitCode and stderr stay inspectable - failures are re-thrown below
+    const execute = async () => (0, exec_1.getExecOutput)('git', args, { ...options, ignoreReturnCode: true, env: (0, safe_directory_1.getGitEnv)() });
+    let result = await execute();
+    if ((0, safe_directory_1.isDubiousOwnershipError)(result.exitCode, result.stderr)) {
+        if (await (0, safe_directory_1.ensureSafeDirectory)(result.stderr)) {
+            result = await execute();
+        }
+        if ((0, safe_directory_1.isDubiousOwnershipError)(result.exitCode, result.stderr)) {
+            const firstLine = (_a = result.stderr
+                .split(/\r?\n/)
+                .find(line => line.trim().length > 0)) === null || _a === void 0 ? void 0 : _a.trim();
+            throw new Error(`${firstLine !== null && firstLine !== void 0 ? firstLine : 'Git failed due to dubious repository ownership'}\n` +
+                'The automatic safe.directory workaround was not sufficient. ' +
+                'Either run the container with the same user as the runner:\n' +
+                '  container:\n' +
+                '    options: --user 1001\n' +
+                'or mark the repository as safe in a step before this action:\n' +
+                '  - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"');
+        }
+    }
+    if (result.exitCode !== 0 && !(options === null || options === void 0 ? void 0 : options.ignoreReturnCode)) {
+        throw new Error(`The process 'git ${args.join(' ')}' failed with exit code ${result.exitCode}`);
+    }
+    return result;
+}
+exports.gitExec = gitExec;
 async function getChangesInLastCommit() {
     core.startGroup(`Change detection in last commit`);
     let output = '';
     try {
-        output = (await (0, exec_1.getExecOutput)('git', ['log', '--format=', '--no-renames', '--name-status', '-z', '-n', '1'])).stdout;
+        output = (await gitExec(['log', '--format=', '--no-renames', '--name-status', '-z', '-n', '1'])).stdout;
     }
     finally {
         fixStdOutNullTermination();
@@ -231,8 +306,7 @@ async function getChanges(base, head) {
     let output = '';
     try {
         // Two dots '..' change detection - directly compares two versions
-        output = (await (0, exec_1.getExecOutput)('git', ['diff', '--no-renames', '--name-status', '-z', `${baseRef}..${headRef}`]))
-            .stdout;
+        output = (await gitExec(['diff', '--no-renames', '--name-status', '-z', `${baseRef}..${headRef}`])).stdout;
     }
     finally {
         fixStdOutNullTermination();
@@ -246,7 +320,7 @@ async function getChangesOnHead() {
     core.startGroup(`Change detection on HEAD`);
     let output = '';
     try {
-        output = (await (0, exec_1.getExecOutput)('git', ['diff', '--no-renames', '--name-status', '-z', 'HEAD'])).stdout;
+        output = (await gitExec(['diff', '--no-renames', '--name-status', '-z', 'HEAD'])).stdout;
     }
     finally {
         fixStdOutNullTermination();
@@ -262,7 +336,7 @@ async function getChangesSinceMergeBase(base, head, initialFetchDepth) {
         if (baseRef === undefined || headRef === undefined) {
             return false;
         }
-        return (await (0, exec_1.getExecOutput)('git', ['merge-base', baseRef, headRef], { ignoreReturnCode: true })).exitCode === 0;
+        return (await gitExec(['merge-base', baseRef, headRef], { ignoreReturnCode: true })).exitCode === 0;
     }
     let noMergeBase = false;
     core.startGroup(`Searching for merge-base ${base}...${head}`);
@@ -270,12 +344,12 @@ async function getChangesSinceMergeBase(base, head, initialFetchDepth) {
         baseRef = await getLocalRef(base);
         headRef = await getLocalRef(head);
         if (!(await hasMergeBase())) {
-            await (0, exec_1.getExecOutput)('git', ['fetch', '--no-tags', `--depth=${initialFetchDepth}`, 'origin', base, head]);
+            await gitExec(['fetch', '--no-tags', `--depth=${initialFetchDepth}`, 'origin', base, head]);
             if (baseRef === undefined || headRef === undefined) {
                 baseRef = baseRef !== null && baseRef !== void 0 ? baseRef : (await getLocalRef(base));
                 headRef = headRef !== null && headRef !== void 0 ? headRef : (await getLocalRef(head));
                 if (baseRef === undefined || headRef === undefined) {
-                    await (0, exec_1.getExecOutput)('git', ['fetch', '--tags', '--depth=1', 'origin', base, head], {
+                    await gitExec(['fetch', '--tags', '--depth=1', 'origin', base, head], {
                         ignoreReturnCode: true // returns exit code 1 if tags on remote were updated - we can safely ignore it
                     });
                     baseRef = baseRef !== null && baseRef !== void 0 ? baseRef : (await getLocalRef(base));
@@ -292,12 +366,12 @@ async function getChangesSinceMergeBase(base, head, initialFetchDepth) {
             let lastCommitCount = await getCommitCount();
             while (!(await hasMergeBase())) {
                 depth = Math.min(depth * 2, Number.MAX_SAFE_INTEGER);
-                await (0, exec_1.getExecOutput)('git', ['fetch', `--deepen=${depth}`, 'origin', base, head]);
+                await gitExec(['fetch', `--deepen=${depth}`, 'origin', base, head]);
                 const commitCount = await getCommitCount();
                 if (commitCount === lastCommitCount) {
                     core.info('No more commits were fetched');
                     core.info('Last attempt will be to fetch full history');
-                    await (0, exec_1.getExecOutput)('git', ['fetch']);
+                    await gitExec(['fetch']);
                     if (!(await hasMergeBase())) {
                         noMergeBase = true;
                     }
@@ -320,7 +394,7 @@ async function getChangesSinceMergeBase(base, head, initialFetchDepth) {
     core.startGroup(`Change detection ${diffArg}`);
     let output = '';
     try {
-        output = (await (0, exec_1.getExecOutput)('git', ['diff', '--no-renames', '--name-status', '-z', diffArg])).stdout;
+        output = (await gitExec(['diff', '--no-renames', '--name-status', '-z', diffArg])).stdout;
     }
     finally {
         fixStdOutNullTermination();
@@ -345,7 +419,7 @@ async function listAllFilesAsAdded() {
     core.startGroup('Listing all files tracked by git');
     let output = '';
     try {
-        output = (await (0, exec_1.getExecOutput)('git', ['ls-files', '-z'])).stdout;
+        output = (await gitExec(['ls-files', '-z'])).stdout;
     }
     finally {
         fixStdOutNullTermination();
@@ -363,15 +437,15 @@ exports.listAllFilesAsAdded = listAllFilesAsAdded;
 async function getCurrentRef() {
     core.startGroup(`Get current git ref`);
     try {
-        const branch = (await (0, exec_1.getExecOutput)('git', ['branch', '--show-current'])).stdout.trim();
-        if (branch) {
+        const branch = (await gitExec(['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
+        if (branch && branch !== 'HEAD') {
             return branch;
         }
-        const describe = await (0, exec_1.getExecOutput)('git', ['describe', '--tags', '--exact-match'], { ignoreReturnCode: true });
+        const describe = await gitExec(['describe', '--tags', '--exact-match'], { ignoreReturnCode: true });
         if (describe.exitCode === 0) {
             return describe.stdout.trim();
         }
-        return (await (0, exec_1.getExecOutput)('git', ['rev-parse', exports.HEAD])).stdout.trim();
+        return (await gitExec(['rev-parse', exports.HEAD])).stdout.trim();
     }
     finally {
         core.endGroup();
@@ -395,10 +469,10 @@ function isGitSha(ref) {
 }
 exports.isGitSha = isGitSha;
 async function hasCommit(ref) {
-    return (await (0, exec_1.getExecOutput)('git', ['cat-file', '-e', `${ref}^{commit}`], { ignoreReturnCode: true })).exitCode === 0;
+    return (await gitExec(['cat-file', '-e', `${ref}^{commit}`], { ignoreReturnCode: true })).exitCode === 0;
 }
 async function getCommitCount() {
-    const output = (await (0, exec_1.getExecOutput)('git', ['rev-list', '--count', '--all'])).stdout;
+    const output = (await gitExec(['rev-list', '--count', '--all'])).stdout;
     const count = parseInt(output);
     return isNaN(count) ? 0 : count;
 }
@@ -406,7 +480,7 @@ async function getLocalRef(shortName) {
     if (isGitSha(shortName)) {
         return (await hasCommit(shortName)) ? shortName : undefined;
     }
-    const output = (await (0, exec_1.getExecOutput)('git', ['show-ref', shortName], { ignoreReturnCode: true })).stdout;
+    const output = (await gitExec(['show-ref', shortName], { ignoreReturnCode: true })).stdout;
     const refs = output
         .split(/\r?\n/g)
         .map(l => l.match(/refs\/(?:(?:heads)|(?:tags)|(?:remotes\/origin))\/(.*)$/))
@@ -426,10 +500,10 @@ async function ensureRefAvailable(name) {
     try {
         let ref = await getLocalRef(name);
         if (ref === undefined) {
-            await (0, exec_1.getExecOutput)('git', ['fetch', '--depth=1', '--no-tags', 'origin', name]);
+            await gitExec(['fetch', '--depth=1', '--no-tags', 'origin', name]);
             ref = await getLocalRef(name);
             if (ref === undefined) {
-                await (0, exec_1.getExecOutput)('git', ['fetch', '--depth=1', '--tags', 'origin', name]);
+                await gitExec(['fetch', '--depth=1', '--tags', 'origin', name]);
                 ref = await getLocalRef(name);
                 if (ref === undefined) {
                     throw new Error(`Could not determine what is ${name} - fetch works but it's not a branch, tag or commit SHA`);
@@ -473,7 +547,7 @@ function csvEscape(value) {
     if (value === '')
         return value;
     // Only safe characters
-    if (/^[a-zA-Z0-9._+:@%/-]+$/m.test(value)) {
+    if (/^[a-zA-Z0-9._+:@%/-]+$/.test(value)) {
         return value;
     }
     // https://tools.ietf.org/html/rfc4180
@@ -505,12 +579,12 @@ function shellEscape(value) {
     if (value === '')
         return value;
     // Only safe characters
-    if (/^[a-zA-Z0-9,._+:@%/-]+$/m.test(value)) {
+    if (/^[a-zA-Z0-9,._+:@%/-]+$/.test(value)) {
         return value;
     }
     if (value.includes("'")) {
         // Only safe characters, single quotes and white-spaces
-        if (/^[a-zA-Z0-9,._+:@%/'\s-]+$/m.test(value)) {
+        if (/^[a-zA-Z0-9,._+:@%/'\s-]+$/.test(value)) {
             return `"${value}"`;
         }
         // Split by single quote and apply escaping recursively
@@ -559,6 +633,7 @@ const github = __importStar(__nccwpck_require__(5438));
 const filter_1 = __nccwpck_require__(3707);
 const file_1 = __nccwpck_require__(4014);
 const git = __importStar(__nccwpck_require__(3374));
+const safe_directory_1 = __nccwpck_require__(2126);
 const shell_escape_1 = __nccwpck_require__(4613);
 const csv_escape_1 = __nccwpck_require__(7402);
 async function run() {
@@ -594,6 +669,9 @@ async function run() {
     catch (error) {
         core.setFailed(getErrorMessage(error));
     }
+    finally {
+        await (0, safe_directory_1.cleanup)();
+    }
 }
 function isPathInput(text) {
     return !(text.includes('\n') || text.includes(':'));
@@ -627,11 +705,11 @@ async function getChangedFiles(token, base, ref, initialFetchDepth) {
             if (ref) {
                 core.warning(`'ref' input parameter is ignored when action is triggered by pull request event`);
             }
-            if (base) {
-                core.warning(`'base' input parameter is ignored when action is triggered by pull request event`);
-            }
             const pr = github.context.payload.pull_request;
             if (token) {
+                if (base) {
+                    core.warning(`'base' input parameter is ignored when action is triggered by pull request event and 'token' is provided - set token: '' to detect changes using git diff against 'base'`);
+                }
                 return await getChangedFilesFromApi(token, pr);
             }
             if (github.context.eventName === 'pull_request_target') {
@@ -641,6 +719,9 @@ async function getChangedFiles(token, base, ref, initialFetchDepth) {
                 throw new Error(`'token' input parameter is required if action is triggered by 'pull_request_target' event`);
             }
             core.info('GitHub token is not available - changes will be detected using git diff');
+            if (base) {
+                core.info(`Using base '${base}' instead of the pull request base`);
+            }
             const baseSha = (_a = github.context.payload.pull_request) === null || _a === void 0 ? void 0 : _a.base.sha;
             const defaultBranch = (_b = github.context.payload.repository) === null || _b === void 0 ? void 0 : _b.default_branch;
             const currentRef = await git.getCurrentRef();
@@ -815,6 +896,164 @@ function getErrorMessage(error) {
     return String(error);
 }
 run();
+
+
+/***/ }),
+
+/***/ 2126:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.resolveTempBaseDir = exports.buildGitEnv = exports.createTempGitHome = exports.cleanup = exports.ensureSafeDirectory = exports.getGitEnv = exports.parseRepositoryPath = exports.isDubiousOwnershipError = void 0;
+const fs = __importStar(__nccwpck_require__(7147));
+const os = __importStar(__nccwpck_require__(2037));
+const path = __importStar(__nccwpck_require__(1017));
+const core = __importStar(__nccwpck_require__(2186));
+const exec_1 = __nccwpck_require__(1514);
+// Git >= 2.35.2 and distro backports of CVE-2022-24765 fail with exit code 128 when
+// the repository is owned by a different user - typical for container jobs where the
+// workspace is bind-mounted from the host. Older backports use the "unsafe repository" wording.
+const DUBIOUS_OWNERSHIP_PATTERN = /detected dubious ownership|unsafe repository/;
+const REPOSITORY_PATH_PATTERN = /(?:repository at|unsafe repository \()\s*'([^']+)'/;
+let tempHomeDir;
+let gitEnv;
+const safeDirectories = new Set();
+function isDubiousOwnershipError(exitCode, stderr) {
+    return exitCode === 128 && DUBIOUS_OWNERSHIP_PATTERN.test(stderr);
+}
+exports.isDubiousOwnershipError = isDubiousOwnershipError;
+function parseRepositoryPath(stderr) {
+    var _a;
+    return (_a = stderr.match(REPOSITORY_PATH_PATTERN)) === null || _a === void 0 ? void 0 : _a[1];
+}
+exports.parseRepositoryPath = parseRepositoryPath;
+// Until the workaround is activated this mirrors process.env; afterwards it applies the
+// temporary HOME redirect. In both cases LC_ALL=C is forced so git emits untranslated
+// messages and isDubiousOwnershipError / parseRepositoryPath match regardless of the
+// container's locale.
+function getGitEnv() {
+    return { ...(gitEnv !== null && gitEnv !== void 0 ? gitEnv : cloneDefinedEnv(process.env)), LC_ALL: 'C' };
+}
+exports.getGitEnv = getGitEnv;
+// Marks directories reported by git as safe, using a temporary HOME so no configuration
+// outside this action is modified - same technique as actions/checkout.
+// Returns false if there was no new directory to add.
+async function ensureSafeDirectory(stderr) {
+    if (tempHomeDir === undefined) {
+        tempHomeDir = await createTempGitHome(resolveTempBaseDir(process.env), process.env);
+        gitEnv = buildGitEnv(tempHomeDir, process.env);
+        core.info('Git reported dubious ownership of the repository - this is typical for container jobs ' +
+            'where the workspace is owned by a different user. A temporary HOME with a copy of the global ' +
+            'git config and a safe.directory exception will be used for git commands executed by this action.');
+    }
+    let added = false;
+    for (const dir of [parseRepositoryPath(stderr), process.env.GITHUB_WORKSPACE, process.cwd()]) {
+        if (dir && !safeDirectories.has(dir)) {
+            await (0, exec_1.exec)('git', ['config', '--global', '--add', 'safe.directory', dir], { env: getGitEnv() });
+            safeDirectories.add(dir);
+            added = true;
+        }
+    }
+    return added;
+}
+exports.ensureSafeDirectory = ensureSafeDirectory;
+async function cleanup() {
+    if (tempHomeDir !== undefined) {
+        try {
+            await fs.promises.rm(tempHomeDir, { recursive: true, force: true });
+        }
+        catch (error) {
+            // Cleanup failure is not fatal - RUNNER_TEMP is wiped when the job ends
+        }
+    }
+    tempHomeDir = undefined;
+    gitEnv = undefined;
+    safeDirectories.clear();
+}
+exports.cleanup = cleanup;
+// Exported for tests
+async function createTempGitHome(baseTempDir, env) {
+    const tempHome = await fs.promises.mkdtemp(path.join(baseTempDir, 'paths-filter-git-home-'));
+    const tempConfigPath = path.join(tempHome, '.gitconfig');
+    // The file must exist even when there is no config to copy - when $HOME/.gitconfig is missing,
+    // `git config --global` writes to an existing $XDG_CONFIG_HOME/git/config instead
+    await fs.promises.writeFile(tempConfigPath, '');
+    if (env.GIT_CONFIG_GLOBAL) {
+        await copyFileIfExists(env.GIT_CONFIG_GLOBAL, tempConfigPath);
+    }
+    else if (env.HOME) {
+        await copyFileIfExists(path.join(env.HOME, '.gitconfig'), tempConfigPath);
+        if (!env.XDG_CONFIG_HOME) {
+            // When XDG_CONFIG_HOME is unset, git falls back to $HOME/.config/git/config,
+            // which would become unreadable under the new HOME
+            await copyFileIfExists(path.join(env.HOME, '.config', 'git', 'config'), path.join(tempHome, '.config', 'git', 'config'));
+        }
+    }
+    return tempHome;
+}
+exports.createTempGitHome = createTempGitHome;
+// Exported for tests
+function buildGitEnv(tempHome, env) {
+    const newEnv = cloneDefinedEnv(env);
+    // A changed HOME redirects git of any version to the temp config. GIT_CONFIG_GLOBAL is redirected
+    // only when already set - on git >= 2.32 it replaces both global config files, so setting it
+    // unconditionally would hide an existing $XDG_CONFIG_HOME/git/config from git
+    newEnv['HOME'] = tempHome;
+    if (env.GIT_CONFIG_GLOBAL) {
+        newEnv['GIT_CONFIG_GLOBAL'] = path.join(tempHome, '.gitconfig');
+    }
+    return newEnv;
+}
+exports.buildGitEnv = buildGitEnv;
+// Exported for tests
+function resolveTempBaseDir(env) {
+    return env.RUNNER_TEMP || os.tmpdir();
+}
+exports.resolveTempBaseDir = resolveTempBaseDir;
+function cloneDefinedEnv(env) {
+    const newEnv = {};
+    for (const [key, value] of Object.entries(env)) {
+        if (value !== undefined) {
+            newEnv[key] = value;
+        }
+    }
+    return newEnv;
+}
+async function copyFileIfExists(source, destination) {
+    try {
+        await fs.promises.access(source, fs.constants.R_OK);
+    }
+    catch (error) {
+        return;
+    }
+    await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+    await fs.promises.copyFile(source, destination);
+}
 
 
 /***/ }),
@@ -12135,20 +12374,35 @@ function onceStrict (fn) {
 "use strict";
 
 
-module.exports = __nccwpck_require__(3322);
+const pico = __nccwpck_require__(3322);
+const utils = __nccwpck_require__(479);
+
+function picomatch(glob, options, returnState = false) {
+  // default to os.platform()
+  if (options && (options.windows === null || options.windows === undefined)) {
+    // don't mutate the original options object
+    options = { ...options, windows: utils.isWindows() };
+  }
+
+  return pico(glob, options, returnState);
+}
+
+Object.assign(picomatch, pico);
+module.exports = picomatch;
 
 
 /***/ }),
 
 /***/ 6099:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+/***/ ((module) => {
 
 "use strict";
 
 
-const path = __nccwpck_require__(1017);
 const WIN_SLASH = '\\\\/';
 const WIN_NO_SLASH = `[^${WIN_SLASH}]`;
+
+const DEFAULT_MAX_EXTGLOB_RECURSION = 0;
 
 /**
  * Posix glob regex
@@ -12169,6 +12423,7 @@ const NO_DOT_SLASH = `(?!${DOT_LITERAL}{0,1}${END_ANCHOR})`;
 const NO_DOTS_SLASH = `(?!${DOTS_SLASH})`;
 const QMARK_NO_DOT = `[^.${SLASH_LITERAL}]`;
 const STAR = `${QMARK}*?`;
+const SEP = '/';
 
 const POSIX_CHARS = {
   DOT_LITERAL,
@@ -12185,7 +12440,8 @@ const POSIX_CHARS = {
   NO_DOTS_SLASH,
   QMARK_NO_DOT,
   STAR,
-  START_ANCHOR
+  START_ANCHOR,
+  SEP
 };
 
 /**
@@ -12205,7 +12461,8 @@ const WINDOWS_CHARS = {
   NO_DOTS_SLASH: `(?!${DOT_LITERAL}{1,2}(?:[${WIN_SLASH}]|$))`,
   QMARK_NO_DOT: `[^.${WIN_SLASH}]`,
   START_ANCHOR: `(?:^|[${WIN_SLASH}])`,
-  END_ANCHOR: `(?:[${WIN_SLASH}]|$)`
+  END_ANCHOR: `(?:[${WIN_SLASH}]|$)`,
+  SEP: '\\'
 };
 
 /**
@@ -12213,6 +12470,7 @@ const WINDOWS_CHARS = {
  */
 
 const POSIX_REGEX_SOURCE = {
+  __proto__: null,
   alnum: 'a-zA-Z0-9',
   alpha: 'a-zA-Z',
   ascii: '\\x00-\\x7F',
@@ -12230,6 +12488,7 @@ const POSIX_REGEX_SOURCE = {
 };
 
 module.exports = {
+  DEFAULT_MAX_EXTGLOB_RECURSION,
   MAX_LENGTH: 1024 * 64,
   POSIX_REGEX_SOURCE,
 
@@ -12243,6 +12502,7 @@ module.exports = {
 
   // Replace globs with equivalent patterns to reduce parsing time.
   REPLACEMENTS: {
+    __proto__: null,
     '***': '*',
     '**/**': '**',
     '**/**/**': '**'
@@ -12298,8 +12558,6 @@ module.exports = {
   CHAR_UNDERSCORE: 95, /* _ */
   CHAR_VERTICAL_LINE: 124, /* | */
   CHAR_ZERO_WIDTH_NOBREAK_SPACE: 65279, /* \uFEFF */
-
-  SEP: path.sep,
 
   /**
    * Create EXTGLOB_CHARS
@@ -12378,6 +12636,307 @@ const syntaxError = (type, char) => {
   return `Missing ${type}: "${char}" - use "\\\\${char}" to match literal characters`;
 };
 
+const splitTopLevel = input => {
+  const parts = [];
+  let bracket = 0;
+  let paren = 0;
+  let quote = 0;
+  let value = '';
+  let escaped = false;
+
+  for (const ch of input) {
+    if (escaped === true) {
+      value += ch;
+      escaped = false;
+      continue;
+    }
+
+    if (ch === '\\') {
+      value += ch;
+      escaped = true;
+      continue;
+    }
+
+    if (ch === '"') {
+      quote = quote === 1 ? 0 : 1;
+      value += ch;
+      continue;
+    }
+
+    if (quote === 0) {
+      if (ch === '[') {
+        bracket++;
+      } else if (ch === ']' && bracket > 0) {
+        bracket--;
+      } else if (bracket === 0) {
+        if (ch === '(') {
+          paren++;
+        } else if (ch === ')' && paren > 0) {
+          paren--;
+        } else if (ch === '|' && paren === 0) {
+          parts.push(value);
+          value = '';
+          continue;
+        }
+      }
+    }
+
+    value += ch;
+  }
+
+  parts.push(value);
+  return parts;
+};
+
+const isPlainBranch = branch => {
+  let escaped = false;
+
+  for (const ch of branch) {
+    if (escaped === true) {
+      escaped = false;
+      continue;
+    }
+
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (/[?*+@!()[\]{}]/.test(ch)) {
+      return false;
+    }
+  }
+
+  return true;
+};
+
+const normalizeSimpleBranch = branch => {
+  let value = branch.trim();
+  let changed = true;
+
+  while (changed === true) {
+    changed = false;
+
+    if (/^@\([^\\()[\]{}|]+\)$/.test(value)) {
+      value = value.slice(2, -1);
+      changed = true;
+    }
+  }
+
+  if (!isPlainBranch(value)) {
+    return;
+  }
+
+  return value.replace(/\\(.)/g, '$1');
+};
+
+const hasRepeatedCharPrefixOverlap = branches => {
+  const values = branches.map(normalizeSimpleBranch).filter(Boolean);
+
+  for (let i = 0; i < values.length; i++) {
+    for (let j = i + 1; j < values.length; j++) {
+      const a = values[i];
+      const b = values[j];
+      const char = a[0];
+
+      if (!char || a !== char.repeat(a.length) || b !== char.repeat(b.length)) {
+        continue;
+      }
+
+      if (a === b || a.startsWith(b) || b.startsWith(a)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+};
+
+const parseRepeatedExtglob = (pattern, requireEnd = true) => {
+  if ((pattern[0] !== '+' && pattern[0] !== '*') || pattern[1] !== '(') {
+    return;
+  }
+
+  let bracket = 0;
+  let paren = 0;
+  let quote = 0;
+  let escaped = false;
+
+  for (let i = 1; i < pattern.length; i++) {
+    const ch = pattern[i];
+
+    if (escaped === true) {
+      escaped = false;
+      continue;
+    }
+
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (ch === '"') {
+      quote = quote === 1 ? 0 : 1;
+      continue;
+    }
+
+    if (quote === 1) {
+      continue;
+    }
+
+    if (ch === '[') {
+      bracket++;
+      continue;
+    }
+
+    if (ch === ']' && bracket > 0) {
+      bracket--;
+      continue;
+    }
+
+    if (bracket > 0) {
+      continue;
+    }
+
+    if (ch === '(') {
+      paren++;
+      continue;
+    }
+
+    if (ch === ')') {
+      paren--;
+
+      if (paren === 0) {
+        if (requireEnd === true && i !== pattern.length - 1) {
+          return;
+        }
+
+        return {
+          type: pattern[0],
+          body: pattern.slice(2, i),
+          end: i
+        };
+      }
+    }
+  }
+};
+
+const buildCharClassStar = chars => {
+  const source = chars.length === 1
+    ? utils.escapeRegex(chars[0])
+    : `[${chars.map(ch => utils.escapeRegex(ch)).join('')}]`;
+
+  return `${source}*`;
+};
+
+const getStarExtglobSequenceChars = pattern => {
+  let index = 0;
+  const chars = [];
+
+  while (index < pattern.length) {
+    const match = parseRepeatedExtglob(pattern.slice(index), false);
+
+    if (!match || match.type !== '*') {
+      return;
+    }
+
+    const branches = splitTopLevel(match.body).map(branch => branch.trim());
+    if (branches.length !== 1) {
+      return;
+    }
+
+    const branch = normalizeSimpleBranch(branches[0]);
+    if (!branch || branch.length !== 1) {
+      return;
+    }
+
+    chars.push(branch);
+    index += match.end + 1;
+  }
+
+  if (chars.length < 1) {
+    return;
+  }
+
+  return chars;
+};
+
+const repeatedExtglobRecursion = pattern => {
+  let depth = 0;
+  let value = pattern.trim();
+  let match = parseRepeatedExtglob(value);
+
+  while (match) {
+    depth++;
+    value = match.body.trim();
+    match = parseRepeatedExtglob(value);
+  }
+
+  return depth;
+};
+
+const analyzeRepeatedExtglob = (body, options) => {
+  if (options.maxExtglobRecursion === false) {
+    return { risky: false };
+  }
+
+  const max =
+    typeof options.maxExtglobRecursion === 'number'
+      ? options.maxExtglobRecursion
+      : constants.DEFAULT_MAX_EXTGLOB_RECURSION;
+
+  const branches = splitTopLevel(body).map(branch => branch.trim());
+
+  if (branches.length > 1) {
+    if (
+      branches.some(branch => branch === '') ||
+      branches.some(branch => /^[*?]+$/.test(branch)) ||
+      hasRepeatedCharPrefixOverlap(branches)
+    ) {
+      return { risky: true };
+    }
+  }
+
+  // A repeated extglob is "risky" (prone to catastrophic backtracking) when a
+  // branch is itself a `*(...)` sequence, since that nests an unbounded quantifier
+  // inside the outer `+(...)`/`*(...)`. When *every* branch reduces to single
+  // characters we can emit one flat, ReDoS-safe character class that preserves the
+  // meaning of ALL branches (e.g. `+(*(a)|*(b))` -> `[ab]*`), rather than dropping
+  // every branch but the first.
+  const safeChars = [];
+  let sawStarSequence = false;
+  let combinable = true;
+
+  for (const branch of branches) {
+    const chars = getStarExtglobSequenceChars(branch);
+    if (chars) {
+      sawStarSequence = true;
+      safeChars.push(...chars);
+      continue;
+    }
+
+    const literal = normalizeSimpleBranch(branch);
+    if (literal && literal.length === 1) {
+      safeChars.push(literal);
+      continue;
+    }
+
+    combinable = false;
+
+    if (repeatedExtglobRecursion(branch) > max) {
+      return { risky: true };
+    }
+  }
+
+  if (sawStarSequence) {
+    return combinable
+      ? { risky: true, safeOutput: buildCharClassStar([...new Set(safeChars)]) }
+      : { risky: true };
+  }
+
+  return { risky: false };
+};
+
 /**
  * Parse the given input string.
  * @param {String} input
@@ -12404,10 +12963,9 @@ const parse = (input, options) => {
   const tokens = [bos];
 
   const capture = opts.capture ? '' : '?:';
-  const win32 = utils.isWindows(options);
 
   // create constants based on platform, for windows or posix
-  const PLATFORM_CHARS = constants.globChars(win32);
+  const PLATFORM_CHARS = constants.globChars(opts.windows);
   const EXTGLOB_CHARS = constants.extglobChars(PLATFORM_CHARS);
 
   const {
@@ -12543,8 +13101,8 @@ const parse = (input, options) => {
 
     if (tok.value || tok.output) append(tok);
     if (prev && prev.type === 'text' && tok.type === 'text') {
+      prev.output = (prev.output || prev.value) + tok.value;
       prev.value += tok.value;
-      prev.output = (prev.output || '') + tok.value;
       return;
     }
 
@@ -12559,6 +13117,8 @@ const parse = (input, options) => {
     token.prev = prev;
     token.parens = state.parens;
     token.output = state.output;
+    token.startIndex = state.index;
+    token.tokensIndex = tokens.length;
     const output = (opts.capture ? '(' : '') + token.open;
 
     increment('parens');
@@ -12568,6 +13128,34 @@ const parse = (input, options) => {
   };
 
   const extglobClose = token => {
+    const literal = input.slice(token.startIndex, state.index + 1);
+    const body = input.slice(token.startIndex + 2, state.index);
+    const analysis = analyzeRepeatedExtglob(body, opts);
+
+    if ((token.type === 'plus' || token.type === 'star') && analysis.risky) {
+      const safeOutput = analysis.safeOutput
+        ? (token.output ? '' : ONE_CHAR) + (opts.capture ? `(${analysis.safeOutput})` : analysis.safeOutput)
+        : undefined;
+      const open = tokens[token.tokensIndex];
+
+      open.type = 'text';
+      open.value = literal;
+      open.output = safeOutput || utils.escapeRegex(literal);
+
+      for (let i = token.tokensIndex + 1; i < tokens.length; i++) {
+        tokens[i].value = '';
+        tokens[i].output = '';
+        delete tokens[i].suffix;
+      }
+
+      state.output = token.output + open.output;
+      state.backtrack = true;
+
+      push({ type: 'paren', extglob: true, value, output: '' });
+      decrement('parens');
+      return;
+    }
+
     let output = token.close + (opts.capture ? ')' : '');
     let rest;
 
@@ -13032,10 +13620,6 @@ const parse = (input, options) => {
         const next = peek();
         let output = value;
 
-        if (next === '<' && !utils.supportsLookbehinds()) {
-          throw new Error('Node.js v10 or higher is required for regex lookbehinds');
-        }
-
         if ((prev.value === '(' && !/[!=<:]/.test(next)) || (next === '<' && !/<([!=]|\w+>)/.test(remaining()))) {
           output = `\\${value}`;
         }
@@ -13182,6 +13766,15 @@ const parse = (input, options) => {
         consume('/**', 3);
       }
 
+      // A globstar followed only by balanced closing parens is at the logical end of patterns like
+      // `test(/utils/**)` and `test?(/utils/**)`. Treat it as EOS so the trailing `/**` can match its
+      // parent path, except in negated extglobs where that would change the exclusion semantics.
+      const isEnd = eos() || (
+        state.parens > 0
+        && rest === ')'.repeat(state.parens)
+        && !extglobs.some(extglob => extglob.type === 'negate')
+      );
+
       if (prior.type === 'bos' && eos()) {
         prev.type = 'globstar';
         prev.value += value;
@@ -13192,7 +13785,7 @@ const parse = (input, options) => {
         continue;
       }
 
-      if (prior.type === 'slash' && prior.prev.type !== 'bos' && !afterStar && eos()) {
+      if (prior.type === 'slash' && prior.prev.type !== 'bos' && !afterStar && isEnd) {
         state.output = state.output.slice(0, -(prior.output + prev.output).length);
         prior.output = `(?:${prior.output}`;
 
@@ -13343,7 +13936,6 @@ parse.fastpaths = (input, options) => {
   }
 
   input = REPLACEMENTS[input] || input;
-  const win32 = utils.isWindows(options);
 
   // create constants based on platform, for windows or posix
   const {
@@ -13356,7 +13948,7 @@ parse.fastpaths = (input, options) => {
     NO_DOTS_SLASH,
     STAR,
     START_ANCHOR
-  } = constants.globChars(win32);
+  } = constants.globChars(opts.windows);
 
   const nodot = opts.dot ? NO_DOTS : NO_DOT;
   const slashDot = opts.dot ? NO_DOTS_SLASH : NO_DOT;
@@ -13432,7 +14024,6 @@ module.exports = parse;
 "use strict";
 
 
-const path = __nccwpck_require__(1017);
 const scan = __nccwpck_require__(2429);
 const parse = __nccwpck_require__(2139);
 const utils = __nccwpck_require__(479);
@@ -13453,6 +14044,18 @@ const isObject = val => val && typeof val === 'object' && !Array.isArray(val);
  * const isMatch = picomatch('*.!(*a)');
  * console.log(isMatch('a.a')); //=> false
  * console.log(isMatch('a.b')); //=> true
+ *
+ * // For environments without `node.js`, `picomatch/posix` provides you a dependency-free matcher, without automatic OS detection.
+ * const picomatch = require('picomatch/posix');
+ * // the same API, defaulting to posix paths
+ * const isMatch = picomatch('a/*');
+ * console.log(isMatch('a\\b')); //=> false
+ * console.log(isMatch('a/b')); //=> true
+ *
+ * // you can still configure the matcher function to accept windows paths
+ * const isMatch = picomatch('a/*', { options: windows });
+ * console.log(isMatch('a\\b')); //=> true
+ * console.log(isMatch('a/b')); //=> true
  * ```
  * @name picomatch
  * @param {String|Array} `globs` One or more glob patterns.
@@ -13481,7 +14084,7 @@ const picomatch = (glob, options, returnState = false) => {
   }
 
   const opts = options || {};
-  const posix = utils.isWindows(options);
+  const posix = opts.windows;
   const regex = isState
     ? picomatch.compileRe(glob, options)
     : picomatch.makeRe(glob, options, false, true);
@@ -13590,9 +14193,9 @@ picomatch.test = (input, regex, options, { glob, posix } = {}) => {
  * @api public
  */
 
-picomatch.matchBase = (input, glob, options, posix = utils.isWindows(options)) => {
+picomatch.matchBase = (input, glob, options, posix = options && options.windows) => {
   const regex = glob instanceof RegExp ? glob : picomatch.makeRe(glob, options);
-  return regex.test(path.basename(input));
+  return regex.test(utils.basename(input, { windows: posix }));
 };
 
 /**
@@ -13666,6 +14269,14 @@ picomatch.scan = (input, options) => scan(input, options);
  * Compile a regular expression from the `state` object returned by the
  * [parse()](#parse) method.
  *
+ * ```js
+ * const picomatch = require('picomatch');
+ * const state = picomatch.parse('*.js');
+ * // picomatch.compileRe(state[, options]);
+ *
+ * console.log(picomatch.compileRe(state));
+ * //=> /^(?:(?!\.)(?=.)[^/]*?\.js)$/
+ * ```
  * @param {Object} `state`
  * @param {Object} `options`
  * @param {Boolean} `returnOutput` Intended for implementors, this argument allows you to return the raw output from the parser.
@@ -13701,10 +14312,10 @@ picomatch.compileRe = (state, options, returnOutput = false, returnState = false
  *
  * ```js
  * const picomatch = require('picomatch');
- * const state = picomatch.parse('*.js');
- * // picomatch.compileRe(state[, options]);
+ * // picomatch.makeRe(state[, options]);
  *
- * console.log(picomatch.compileRe(state));
+ * const result = picomatch.makeRe('*.js');
+ * console.log(result);
  * //=> /^(?:(?!\.)(?=.)[^/]*?\.js)$/
  * ```
  * @param {String} `state` The object returned from the `.parse` method.
@@ -13832,7 +14443,7 @@ const scan = (input, options) => {
   const opts = options || {};
 
   const length = input.length - 1;
-  const scanToEnd = opts.parts === true || opts.scanToEnd === true;
+  const scanToEnd = opts.parts === true || opts.tokens === true || opts.scanToEnd === true;
   const slashes = [];
   const tokens = [];
   const parts = [];
@@ -13966,15 +14577,21 @@ const scan = (input, options) => {
         }
 
         if (scanToEnd === true) {
+          let parens = 0;
+
           while (eos() !== true && (code = advance())) {
             if (code === CHAR_BACKWARD_SLASH) {
               backslashes = token.backslashes = true;
-              code = advance();
+              advance();
               continue;
             }
 
-            if (code === CHAR_RIGHT_PARENTHESES) {
-              isGlob = token.isGlob = true;
+            if (code === CHAR_LEFT_PARENTHESES) {
+              parens++;
+              continue;
+            }
+
+            if (code === CHAR_RIGHT_PARENTHESES && --parens === 0) {
               finished = true;
               break;
             }
@@ -14039,14 +14656,21 @@ const scan = (input, options) => {
       isGlob = token.isGlob = true;
 
       if (scanToEnd === true) {
+        let parens = 1;
+
         while (eos() !== true && (code = advance())) {
-          if (code === CHAR_LEFT_PARENTHESES) {
+          if (code === CHAR_BACKWARD_SLASH) {
             backslashes = token.backslashes = true;
-            code = advance();
+            advance();
             continue;
           }
 
-          if (code === CHAR_RIGHT_PARENTHESES) {
+          if (code === CHAR_LEFT_PARENTHESES) {
+            parens++;
+            continue;
+          }
+
+          if (code === CHAR_RIGHT_PARENTHESES && --parens === 0) {
             finished = true;
             break;
           }
@@ -14133,7 +14757,7 @@ const scan = (input, options) => {
     let prevIndex;
 
     for (let idx = 0; idx < slashes.length; idx++) {
-      const n = prevIndex ? prevIndex + 1 : start;
+      const n = prevIndex !== undefined ? prevIndex + 1 : start;
       const i = slashes[idx];
       const value = input.slice(n, i);
       if (opts.tokens) {
@@ -14146,21 +14770,20 @@ const scan = (input, options) => {
         depth(tokens[idx]);
         state.maxDepth += tokens[idx].depth;
       }
-      if (idx !== 0 || value !== '') {
+      if (i >= start) {
         parts.push(value);
+        prevIndex = i;
       }
-      prevIndex = i;
     }
 
-    if (prevIndex && prevIndex + 1 < input.length) {
-      const value = input.slice(prevIndex + 1);
-      parts.push(value);
+    const n = prevIndex !== undefined ? prevIndex + 1 : start;
+    const value = input.slice(n);
+    parts.push(value);
 
-      if (opts.tokens) {
-        tokens[tokens.length - 1].value = value;
-        depth(tokens[tokens.length - 1]);
-        state.maxDepth += tokens[tokens.length - 1].depth;
-      }
+    if (opts.tokens && prevIndex && prevIndex + 1 < input.length) {
+      tokens[tokens.length - 1].value = value;
+      depth(tokens[tokens.length - 1]);
+      state.maxDepth += tokens[tokens.length - 1].depth;
     }
 
     state.slashes = slashes;
@@ -14179,10 +14802,9 @@ module.exports = scan;
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 "use strict";
+/*global navigator*/
 
 
-const path = __nccwpck_require__(1017);
-const win32 = process.platform === 'win32';
 const {
   REGEX_BACKSLASH,
   REGEX_REMOVE_BACKSLASH,
@@ -14196,25 +14818,23 @@ exports.isRegexChar = str => str.length === 1 && exports.hasRegexChars(str);
 exports.escapeRegex = str => str.replace(REGEX_SPECIAL_CHARS_GLOBAL, '\\$1');
 exports.toPosixSlashes = str => str.replace(REGEX_BACKSLASH, '/');
 
+exports.isWindows = () => {
+  if (typeof navigator !== 'undefined' && navigator.platform) {
+    const platform = navigator.platform.toLowerCase();
+    return platform === 'win32' || platform === 'windows';
+  }
+
+  if (typeof process !== 'undefined' && process.platform) {
+    return process.platform === 'win32';
+  }
+
+  return false;
+};
+
 exports.removeBackslashes = str => {
   return str.replace(REGEX_REMOVE_BACKSLASH, match => {
     return match === '\\' ? '' : match;
   });
-};
-
-exports.supportsLookbehinds = () => {
-  const segs = process.version.slice(1).split('.').map(Number);
-  if (segs.length === 3 && segs[0] >= 9 || (segs[0] === 8 && segs[1] >= 10)) {
-    return true;
-  }
-  return false;
-};
-
-exports.isWindows = options => {
-  if (options && typeof options.windows === 'boolean') {
-    return options.windows;
-  }
-  return win32 === true || path.sep === '\\';
 };
 
 exports.escapeLast = (input, char, lastIdx) => {
@@ -14242,6 +14862,17 @@ exports.wrapOutput = (input, state = {}, options = {}) => {
     output = `(?:^(?!${output}).*$)`;
   }
   return output;
+};
+
+exports.basename = (path, { windows } = {}) => {
+  const segs = path.split(windows ? /[\\/]/ : '/');
+  const last = segs[segs.length - 1];
+
+  if (last === '') {
+    return segs[segs.length - 2];
+  }
+
+  return last;
 };
 
 
